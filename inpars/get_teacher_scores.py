@@ -1,5 +1,6 @@
 import os
 import csv
+import pickle
 import torch
 import argparse
 import pandas as pd
@@ -13,8 +14,12 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     T5ForConditionalGeneration
 )
+from collections import defaultdict
+
 from . import utils
-from .dataset import load_corpus, load_queries
+from .dataset import load_corpus as load_corpus_beir, load_queries as load_queries_beir
+
+import datasets
 
 # Based on https://github.com/castorini/pygaggle/blob/f54ae53d6183c1b66444fa5a0542301e0d1090f5/pygaggle/rerank/base.py#L63
 prediction_tokens = {
@@ -192,6 +197,63 @@ class MonoBERTReranker(Reranker):
         return scores
 
 
+def load_corpus(corpus_path, *args, **kwargs):
+    if '.csv' in corpus_path:
+        assert len(args) == 0 and len(kwargs) == 0, "No additional arguments should be passed to load_corpus when loading from CSV"
+        corpus = pd.read_csv(corpus_path, index_col=0)
+        corpus.index = corpus.index.astype(str)
+        corpus = corpus.iloc[:, 0].to_dict()
+    elif '.json' in corpus_path:
+        assert len(args) == 0 and len(kwargs) == 0, "No additional arguments should be passed to load_corpus when loading from CSV"
+        corpus = pd.read_json(corpus_path, lines=True)
+        id_col, text_col = corpus.columns[:2]
+        corpus[id_col] = corpus[id_col].astype(str)
+        corpus = corpus.set_index(id_col)
+        corpus = corpus[text_col].to_dict()
+    elif not os.path.exists(corpus_path):
+        # load from huggingface in Tevatron format
+        corpus_hgf = datasets.load_dataset(
+            corpus_path, *args, **kwargs, trust_remote_code=True
+        )['train']
+        corpus = {}
+        for doc in corpus_hgf:
+            corpus[doc['docid']] = doc['title'] + " " + doc['text']
+
+    return corpus
+
+
+def load_queries(queries_path, *args, **kwargs):
+    if '.csv' in queries_path:
+        queries = pd.read_csv(queries_path, index_col=0)
+        queries.index = queries.index.astype(str)
+        queries = queries.iloc[:, 0].to_dict()
+    elif '.tsv' in queries_path:
+        queries = pd.read_csv(queries_path, header=None, sep='\t', index_col=0)
+        queries.index = queries.index.astype(str)
+        queries = queries.iloc[:, 0].to_dict()
+
+    return queries
+
+
+
+class TrecRunFromDict(utils.TRECRun):
+    def __init__(self, run_dict):
+        self.run_dict = run_dict
+        self.df = pd.DataFrame.from_dict(run_dict)
+
+    def to_dict(self):
+        run = defaultdict(dict)
+        for row in self.df.itertuples():
+            run[row.qid][row.docid] = row.score
+        return run
+
+    def save(self, output_path):
+        to_save = self.to_dict()
+        assert output_path.endswith('.pkl')
+        with open(output_path, 'wb') as f:
+            pickle.dump(to_save, f)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default='castorini/monot5-small-msmarco-100k',
@@ -206,9 +268,12 @@ if __name__ == "__main__":
                         help="The dataset source: ir_datasets or pyserini")
     parser.add_argument("--corpus", default=None, type=str,
                         help="Document collection `doc_id` and `text` fields in CSV format.")
+    parser.add_argument("--languages", default=None, type=str,
+                        help="Languages to be encoded.")
+
     parser.add_argument("--queries", default=None, type=str,
                         help="Queries collection with `query_id` and `text` fields in CSV format.")
-    parser.add_argument("--device", default=None, type=str,
+    parser.add_argument("--device", default='cuda', type=str,
                         help="CPU or CUDA device.")
     parser.add_argument("--fp16", action="store_true",
                         help="Whether to use FP16 weights during inference.")
@@ -216,38 +281,39 @@ if __name__ == "__main__":
                         help="Whether to compile the model with `torch.compile`.")
     parser.add_argument("--batch_size", default=16, type=int,
                         help="Batch size for inference.")
-    parser.add_argument("--top_k", default=1_000, type=int,
+    parser.add_argument("--top_k", default=50, type=int,
                         help="Top-k documents to be reranked for each query.")
     args = parser.parse_args()
 
-    if args.dataset:
-        corpus = load_corpus(args.dataset, source=args.dataset_source)
-        corpus = dict(zip(corpus['doc_id'], corpus['text']))
-        queries = load_queries(args.dataset, source=args.dataset_source)
-    else:
-        if '.csv' in args.corpus:
-            corpus = pd.read_csv(args.corpus, index_col=0)
-            corpus.index = corpus.index.astype(str)
-            corpus = corpus.iloc[:, 0].to_dict()
-        elif '.json' in args.corpus:
-            corpus = pd.read_json(args.corpus, lines=True)
-            id_col, text_col = corpus.columns[:2]
-            corpus[id_col] = corpus[id_col].astype(str)
-            corpus = corpus.set_index(id_col)
-            corpus = corpus[text_col].to_dict()
 
-        if '.csv' in args.queries:
-            queries = pd.read_csv(args.queries, index_col=0)
-            queries.index = queries.index.astype(str)
-            queries = queries.iloc[:, 0].to_dict()
-        elif '.tsv' in args.queries:
-            queries = pd.read_csv(args.queries, header=None, sep='\t', index_col=0)
-            queries.index = queries.index.astype(str)
-            queries = queries.iloc[:, 0].to_dict()
+    dataset_name = "Tevatron/msmarco-passage-aug"
+    dataset = datasets.load_dataset(dataset_name, trust_remote_code=True)["train"]
 
-    input_run = args.input_run
-    if args.dataset and not args.input_run:
-        input_run = args.dataset
+    # prepare synthetic queries, corpus and input run
+    queries, corpus = {}, {}
+    keys = ("qid", "docid", "rank", "score", "ranker")
+    input_run_dict = {key: [] for key in keys}
+
+    tmpi = 0
+    for entry in tqdm(dataset):
+        qid, query = entry['query_id'], entry['query']
+        positives = entry['positive_passages']
+        negatives = entry['negative_passages']
+
+        queries[qid] = query
+        for doc in (positives + negatives):
+            docid = doc['docid']
+            corpus[docid] = doc['title'] + " " + doc['text']
+            # input_run[qid][docid] = 1.0 # a fake score
+
+            input_run_dict['qid'].append(qid)
+            input_run_dict['docid'].append(docid)
+            input_run_dict['rank'].append(1)
+            input_run_dict['score'].append(1.0)
+            input_run_dict['ranker'].append(os.path.basename(args.model).strip())
+        tmpi += 1
+        if tmpi > 10:
+            break
 
     model = Reranker.from_pretrained(
         model_name_or_path=args.model,
@@ -258,6 +324,8 @@ if __name__ == "__main__":
         # torchscript=args.torchscript,
     )
 
-    run = utils.TRECRun(input_run)
+    run = TrecRunFromDict(input_run_dict)
     run.rerank(model, queries, corpus, top_k=args.top_k)
     run.save(args.output_run)
+
+    print(f"Saved to {args.output_run}")
