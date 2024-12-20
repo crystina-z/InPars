@@ -108,6 +108,10 @@ class MonoT5Reranker(Reranker):
 
     @torch.inference_mode()
     def rescore(self, pairs: List[List[str]]):
+        max_length = self.tokenizer.model_max_length
+        if max_length > 10_000:
+            max_length = 512
+
         scores = []
         for batch in tqdm(
             utils.chunks(pairs, self.batch_size),
@@ -124,7 +128,7 @@ class MonoT5Reranker(Reranker):
                 padding=True,
                 truncation=True,
                 return_tensors="pt",
-                max_length=self.tokenizer.model_max_length,
+                max_length=max_length,
                 pad_to_multiple_of=(8 if self.torch_compile else None),
             ).to(self.device)
             output = self.model.generate(
@@ -176,6 +180,16 @@ class MonoBERTReranker(Reranker):
 
     @torch.inference_mode()
     def rescore(self, pairs: List[List[str]]):
+        max_length = self.tokenizer.model_max_length
+
+        # TODO -- HACKY:
+        if max_length > 10_000:
+            max_length = 512 
+
+        # MAX_LENGTH = 10_000 # 10k
+        # if max_length > MAX_LENGTH:
+        #     max_length = MAX_LENGTH
+
         scores = []
         for batch in tqdm(
             utils.chunks(pairs, self.batch_size),
@@ -190,7 +204,7 @@ class MonoBERTReranker(Reranker):
                 padding=True,
                 truncation='only_second',
                 return_tensors="pt",
-                max_length=self.tokenizer.model_max_length,
+                max_length=max_length,
             ).to(self.device)
             output = self.model(**tokens)[0]
             scores += output.cpu().detach().tolist()
@@ -260,7 +274,7 @@ if __name__ == "__main__":
             type=str, required=False, help="Reranker model.")
     parser.add_argument("--input_run", default=None, type=str,
                         help="Initial run to be reranked.")
-    parser.add_argument("--output_run", default=None, type=str, required=True,
+    parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="Path to save the reranked run.")
     parser.add_argument("--dataset", default=None, type=str,
                         help="Dataset name from BEIR collection.")
@@ -285,6 +299,14 @@ if __name__ == "__main__":
                         help="Top-k documents to be reranked for each query.")
     args = parser.parse_args()
 
+    
+    args.output_run = os.path.join(args.output_dir, args.model) + '.pkl'
+
+    if os.path.exists(args.output_run):
+        print(f"Skipping {args.model} because it already exists")
+        exit(0)
+
+    os.makedirs(os.path.dirname(args.output_run), exist_ok=True)
 
     dataset_name = "Tevatron/msmarco-passage-aug"
     dataset = datasets.load_dataset(dataset_name, trust_remote_code=True)["train"]
@@ -294,7 +316,6 @@ if __name__ == "__main__":
     keys = ("qid", "docid", "rank", "score", "ranker")
     input_run_dict = {key: [] for key in keys}
 
-    tmpi = 0
     for entry in tqdm(dataset):
         qid, query = entry['query_id'], entry['query']
         positives = entry['positive_passages']
@@ -311,9 +332,6 @@ if __name__ == "__main__":
             input_run_dict['rank'].append(1)
             input_run_dict['score'].append(1.0)
             input_run_dict['ranker'].append(os.path.basename(args.model).strip())
-        tmpi += 1
-        if tmpi > 10:
-            break
 
     model = Reranker.from_pretrained(
         model_name_or_path=args.model,
