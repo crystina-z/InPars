@@ -16,6 +16,6 @@ fi
 
 
 CUDA_VISIBLE_DEVICES=$device_id python -m inpars.get_teacher_scores \
-    --output_dir teacher-scores \
+    --output_dir cross-encoder-scores \
     --model $model \
     --batch_size $batch_size
