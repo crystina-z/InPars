@@ -36,6 +36,7 @@ prediction_tokens = {
     'unicamp-dl/mt5-base-en-msmarco':       ['▁no'   , '▁yes'],
     'unicamp-dl/mt5-base-mmarco-v2':        ['▁no'   , '▁yes'],
     'unicamp-dl/mt5-base-mmarco-v1':        ['▁no'   , '▁yes'],
+    'unicamp-dl/mt5-13b-mmarco-100k':       ['▁no'   , '▁yes'],
 }
 
 
@@ -297,10 +298,15 @@ if __name__ == "__main__":
                         help="Batch size for inference.")
     parser.add_argument("--top_k", default=50, type=int,
                         help="Top-k documents to be reranked for each query.")
+    parser.add_argument("--shard_id", default=0, type=int,
+                        help="Shard Id.")
+    parser.add_argument("--shard_num", default=1, type=int,
+                        help="Shard Number.")
     args = parser.parse_args()
 
     
-    args.output_run = os.path.join(args.output_dir, args.model) + '.pkl'
+    shard_id, shard_num = args.shard_id, args.shard_num
+    args.output_run = os.path.join(args.output_dir, args.model) + f'.{shard_id}__{shard_num}.pkl'
 
     if os.path.exists(args.output_run):
         print(f"Skipping {args.model} because it already exists")
@@ -310,6 +316,12 @@ if __name__ == "__main__":
 
     dataset_name = "Tevatron/msmarco-passage-aug"
     dataset = datasets.load_dataset(dataset_name, trust_remote_code=True)["train"]
+    n_dataset = len(dataset)
+    dataset = dataset.shard(
+        num_shards=shard_num,
+        index=shard_id,
+    )
+    print(f"Info: processing the {shard_id}-th shard out of {shard_num}. {len(dataset)} out of {n_dataset} data entries.")
 
     # prepare synthetic queries, corpus and input run
     queries, corpus = {}, {}
