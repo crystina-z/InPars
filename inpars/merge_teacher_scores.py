@@ -23,6 +23,6 @@ if __name__ == "__main__":
     model_name = sys.argv[1]
     model_base_name = os.path.basename(model_name)
 
-    teacher_scores_dir = os.path.join("teacher_scores", model_name, "sharded")
-    merged_scores_path = os.path.join("teacher_scores", model_name, "merged", f"{model_base_name}.pkl")
+    teacher_scores_dir = os.path.join("teacher-scores", model_name, "sharded")
+    merged_scores_path = os.path.join("teacher-scores", model_name, "merged", f"{model_base_name}.pkl")
     merge_teacher_scores(teacher_scores_dir, merged_scores_path)
