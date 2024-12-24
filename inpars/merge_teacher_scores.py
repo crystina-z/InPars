@@ -4,6 +4,12 @@ import pickle
 
 
 def merge_teacher_scores(teacher_scores_dir: str, merged_scores_path: str) -> None:
+    if os.path.exists(merged_scores_path):
+        print(f"File {merged_scores_path} already exists. Skipping...")
+        return
+    
+    os.makedirs(os.path.dirname(merged_scores_path), exist_ok=True)
+
     merged_scores = {}
     for file in os.listdir(teacher_scores_dir):
         if file.endswith(".pkl"):
